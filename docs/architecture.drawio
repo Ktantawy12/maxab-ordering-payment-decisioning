@@ -1,0 +1,87 @@
+<mxfile host="app.diagrams.net" agent="maxab-decisioning" version="24.0.0">
+  <diagram name="Architecture" id="maxab-decisioning-architecture">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2000" pageHeight="1300" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ================= NODES ================= -->
+        <mxCell id="gen" value="Order Generator&#10;scripts/seed_data.py&#10;100,000+ records&#10;40 NDJSON batches" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#616161;fontStyle=1;verticalAlign=top;spacingTop=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="40" y="160" width="200" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="s3" value="S3: RawOrdersBucket&#10;batches/ prefix&#10;SSE-S3, Block Public Access&#10;Versioning: Suspended&#10;Lifecycle: 30-day expiry" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#2E7D32;fontStyle=1;verticalAlign=top;spacingTop=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="300" y="140" width="260" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="eb" value="EventBridge (default bus)&#10;Rule: OrdersUploaded&#10;S3 Object Created&#10;key prefix = batches/" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#E65100;fontStyle=1;verticalAlign=top;spacingTop=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="620" y="90" width="260" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="de" value="Lambda: decision-engine&#10;Python 3.14 | 512MB | 300s&#10;Signals (weighted):&#10;basket_value 0.20   tenure 0.25&#10;fraud 0.35   payment_risk 0.20&#10;-&gt; conditional PutItem" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3F2FD;strokeColor=#1565C0;fontStyle=1;verticalAlign=top;spacingTop=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="960" y="120" width="300" height="190" as="geometry" />
+        </mxCell>
+
+        <mxCell id="dt" value="DynamoDB: DecisionsTable&#10;PK order_id | Stream: NEW_AND_OLD_IMAGES&#10;GSI DecisionIndex (decision, decided_at)&#10;-- ops queries only, not read by pipeline&#10;On-demand billing&#10;&#10;Tiers: APPROVE / MANUAL_REVIEW / DECLINE" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#2E7D32;fontStyle=1;verticalAlign=top;spacingTop=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1360" y="100" width="360" height="210" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cp" value="DynamoDB: CustomerProfilesTable&#10;PK customer_id | no stream, no GSI&#10;Owned exclusively by downstream-processor&#10;On-demand billing" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#2E7D32;fontStyle=1;verticalAlign=top;spacingTop=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="460" width="300" height="140" as="geometry" />
+        </mxCell>
+
+        <mxCell id="dp" value="Lambda: downstream-processor&#10;Python 3.14 | 256MB | 60s&#10;Trigger: DynamoDB Stream&#10;BatchSize 10, INSERT-only filter&#10;Bisect-on-error, ReportBatchItemFailures" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3F2FD;strokeColor=#1565C0;fontStyle=1;verticalAlign=top;spacingTop=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1360" y="660" width="300" height="170" as="geometry" />
+        </mxCell>
+
+        <mxCell id="da" value="DynamoDB: DownstreamActionsTable&#10;PK order_id, SK action_type&#10;GSI StatusIndex (status, created_at)&#10;-- ops queries only, not read by pipeline&#10;On-demand billing&#10;&#10;Actions: FULFILLMENT_RELEASE / MANUAL_REVIEW_QUEUE / BLOCKLIST_LOG" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#2E7D32;fontStyle=1;verticalAlign=top;spacingTop=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1740" y="650" width="380" height="210" as="geometry" />
+        </mxCell>
+
+        <mxCell id="dedlq" value="SQS: DecisionEngineDLQ&#10;Async-invoke OnFailure destination" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#E65100;fontStyle=1;verticalAlign=top;spacingTop=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="960" y="920" width="260" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="dpdlq" value="SQS: DownstreamProcessorDLQ&#10;Stream event-source-mapping&#10;OnFailure destination" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#E65100;fontStyle=1;verticalAlign=top;spacingTop=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1360" y="920" width="280" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cw" value="CloudWatch Logs&#10;2 Log Groups, RetentionInDays: 14&#10;structured JSON per invocation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5F5;strokeColor=#6A1B9A;fontStyle=1;verticalAlign=top;spacingTop=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1140" y="1080" width="280" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- ================= EDGES ================= -->
+        <!-- data flow: solid dark gray -->
+        <mxCell id="e1" value="S3 PutObject" style="html=1;strokeColor=#37474F;strokeWidth=2;endArrow=block;fontColor=#37474F;fontStyle=1;" edge="1" parent="1" source="gen" target="s3"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2" value="GetObject (read NDJSON)" style="html=1;strokeColor=#37474F;strokeWidth=2;endArrow=block;fontColor=#37474F;fontStyle=1;" edge="1" parent="1" source="s3" target="de"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- event trigger: dashed amber -->
+        <mxCell id="e3" value="Object Created" style="html=1;strokeColor=#E65100;strokeWidth=2;dashed=1;endArrow=block;fontColor=#E65100;fontStyle=1;" edge="1" parent="1" source="s3" target="eb"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4" value="invoke (async)" style="html=1;strokeColor=#E65100;strokeWidth=2;dashed=1;endArrow=block;fontColor=#E65100;fontStyle=1;" edge="1" parent="1" source="eb" target="de"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5" value="DynamoDB Stream (INSERT-only)" style="html=1;strokeColor=#E65100;strokeWidth=2;dashed=1;endArrow=block;fontColor=#E65100;fontStyle=1;" edge="1" parent="1" source="dt" target="dp"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- DynamoDB write: solid green -->
+        <mxCell id="e6" value="conditional PutItem" style="html=1;strokeColor=#2E7D32;strokeWidth=2;endArrow=block;fontColor=#2E7D32;fontStyle=1;" edge="1" parent="1" source="de" target="dt"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e7" value="conditional PutItem" style="html=1;strokeColor=#2E7D32;strokeWidth=2;endArrow=block;fontColor=#2E7D32;fontStyle=1;" edge="1" parent="1" source="dp" target="da"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e8" value="WRITE" style="html=1;strokeColor=#2E7D32;strokeWidth=2;endArrow=block;fontColor=#2E7D32;fontStyle=1;" edge="1" parent="1" source="dp" target="cp"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- DynamoDB read: solid blue -->
+        <mxCell id="e9" value="READ" style="html=1;strokeColor=#1565C0;strokeWidth=2;endArrow=block;fontColor=#1565C0;fontStyle=1;" edge="1" parent="1" source="de" target="cp"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e10" value="READ" style="html=1;strokeColor=#1565C0;strokeWidth=2;endArrow=block;fontColor=#1565C0;fontStyle=1;" edge="1" parent="1" source="dp" target="cp"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- failure / DLQ: dashed red -->
+        <mxCell id="e11" value="on failure" style="html=1;strokeColor=#C62828;strokeWidth=2;dashed=1;endArrow=block;fontColor=#C62828;fontStyle=1;" edge="1" parent="1" source="de" target="dedlq"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e12" value="on failure" style="html=1;strokeColor=#C62828;strokeWidth=2;dashed=1;endArrow=block;fontColor=#C62828;fontStyle=1;" edge="1" parent="1" source="dp" target="dpdlq"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- logs: dashed purple -->
+        <mxCell id="e13" value="logs" style="html=1;strokeColor=#6A1B9A;strokeWidth=2;dashed=1;endArrow=block;fontColor=#6A1B9A;fontStyle=1;" edge="1" parent="1" source="de" target="cw"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e14" value="logs" style="html=1;strokeColor=#6A1B9A;strokeWidth=2;dashed=1;endArrow=block;fontColor=#6A1B9A;fontStyle=1;" edge="1" parent="1" source="dp" target="cw"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- caption -->
+        <mxCell id="caption" value="Order -&gt; S3 -&gt; Decision Engine -&gt; Decision Store -&gt; DynamoDB Stream -&gt; Downstream Processor -&gt; Downstream Actions" style="text;html=1;align=center;verticalAlign=middle;fontStyle=1;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="600" y="1220" width="900" height="30" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

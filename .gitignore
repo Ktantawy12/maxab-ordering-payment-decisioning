@@ -8,5 +8,10 @@ __pycache__/
 data/*.csv
 data/*.json
 data/*.parquet
+data/*.ndjson
+data/batches/
+data/demo/
+.pytest_cache/
+infrastructure/.aws-sam/
 *.log
 .DS_Store

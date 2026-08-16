@@ -1,0 +1,292 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  MaxAB Ordering & Payment decisioning pipeline (take-home assessment).
+  S3 -> EventBridge -> DecisionEngineFunction -> DynamoDB (Decisions table)
+  -> DynamoDB Streams -> DownstreamProcessorFunction -> CustomerProfiles +
+  DownstreamActions tables. Exact resource/key/event/IAM specifications per
+  the approved design plan (sections 4-8).
+
+Globals:
+  Function:
+    Runtime: python3.14
+    Architectures:
+      - x86_64
+
+Resources:
+
+  # -----------------------------------------------------------------------
+  # Storage: raw order batches (source of truth for ingestion, plan 4.1)
+  # -----------------------------------------------------------------------
+
+  RawOrdersBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'maxab-decisioning-raw-orders-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Suspended
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireBatches
+            Status: Enabled
+            Prefix: batches/
+            ExpirationInDays: 30
+
+  RawOrdersBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref RawOrdersBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt RawOrdersBucket.Arn
+              - !Sub '${RawOrdersBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+
+  # -----------------------------------------------------------------------
+  # DynamoDB tables (plan section 4.2-4.4, keys/schemas in section 5)
+  # -----------------------------------------------------------------------
+
+  DecisionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-Decisions'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+        - AttributeName: decision
+          AttributeType: S
+        - AttributeName: decided_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      GlobalSecondaryIndexes:
+        - IndexName: DecisionIndex
+          KeySchema:
+            - AttributeName: decision
+              KeyType: HASH
+            - AttributeName: decided_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+
+  CustomerProfilesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-CustomerProfiles'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: customer_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: customer_id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+
+  DownstreamActionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-DownstreamActions'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+        - AttributeName: action_type
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+        - AttributeName: action_type
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: StatusIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+
+  # -----------------------------------------------------------------------
+  # Dead-letter queues (plan section 4.7 / 13)
+  # -----------------------------------------------------------------------
+
+  DecisionEngineDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-decision-engine-dlq'
+
+  DownstreamProcessorDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-downstream-processor-dlq'
+
+  # -----------------------------------------------------------------------
+  # Log groups with explicit retention (plan section 4.8 / 10 cost note)
+  # -----------------------------------------------------------------------
+
+  DecisionEngineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-decision-engine'
+      RetentionInDays: 14
+
+  DownstreamProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-downstream-processor'
+      RetentionInDays: 14
+
+  # -----------------------------------------------------------------------
+  # Lambda #1: decision engine (plan section 4.5, 6, 7)
+  # IAM is read-only on CustomerProfilesTable and write-only on
+  # DecisionsTable -- this function never creates/updates a profile
+  # (v3 correction).
+  # -----------------------------------------------------------------------
+
+  DecisionEngineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-decision-engine'
+      CodeUri: ../src/
+      Handler: decision_engine.handler.lambda_handler
+      Timeout: 300
+      MemorySize: 512
+      LoggingConfig:
+        LogGroup: !Ref DecisionEngineLogGroup
+      Environment:
+        Variables:
+          DECISIONS_TABLE: !Ref DecisionsTable
+          CUSTOMER_PROFILES_TABLE: !Ref CustomerProfilesTable
+          RULESET_VERSION: v1
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref CustomerProfilesTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref DecisionsTable
+        - S3ReadPolicy:
+            BucketName: !Ref RawOrdersBucket
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt DecisionEngineDLQ.QueueName
+      EventInvokeConfig:
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt DecisionEngineDLQ.Arn
+      Events:
+        OrdersUploaded:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - aws.s3
+              detail-type:
+                - Object Created
+              detail:
+                bucket:
+                  name:
+                    - !Ref RawOrdersBucket
+                object:
+                  key:
+                    - prefix: batches/
+
+  # -----------------------------------------------------------------------
+  # Lambda #2: downstream processor (plan section 4.6, 6, 8)
+  # Sole owner of CustomerProfilesTable (read, update, safe-initialize) --
+  # v3 correction. Triggered by DecisionsTable's stream, INSERT-only.
+  # -----------------------------------------------------------------------
+
+  DownstreamProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-downstream-processor'
+      CodeUri: ../src/
+      Handler: downstream_processor.handler.lambda_handler
+      Timeout: 60
+      MemorySize: 256
+      LoggingConfig:
+        LogGroup: !Ref DownstreamProcessorLogGroup
+      Environment:
+        Variables:
+          CUSTOMER_PROFILES_TABLE: !Ref CustomerProfilesTable
+          DOWNSTREAM_ACTIONS_TABLE: !Ref DownstreamActionsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CustomerProfilesTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref DownstreamActionsTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt DownstreamProcessorDLQ.QueueName
+        - Statement:
+            - Sid: ReadDecisionsStream
+              Effect: Allow
+              Action:
+                - dynamodb:DescribeStream
+                - dynamodb:GetRecords
+                - dynamodb:GetShardIterator
+                - dynamodb:ListStreams
+              Resource: !GetAtt DecisionsTable.StreamArn
+      Events:
+        DecisionsStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt DecisionsTable.StreamArn
+            BatchSize: 10
+            StartingPosition: TRIM_HORIZON
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["INSERT"]}'
+            BisectBatchOnFunctionError: true
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            DestinationConfig:
+              OnFailure:
+                Type: SQS
+                Destination: !GetAtt DownstreamProcessorDLQ.Arn
+
+Outputs:
+  RawOrdersBucketName:
+    Description: Upload NDJSON batches under batches/ in this bucket to trigger the pipeline.
+    Value: !Ref RawOrdersBucket
+  DecisionsTableName:
+    Value: !Ref DecisionsTable
+  CustomerProfilesTableName:
+    Value: !Ref CustomerProfilesTable
+  DownstreamActionsTableName:
+    Value: !Ref DownstreamActionsTable
+  DecisionEngineFunctionName:
+    Value: !Ref DecisionEngineFunction
+  DownstreamProcessorFunctionName:
+    Value: !Ref DownstreamProcessorFunction

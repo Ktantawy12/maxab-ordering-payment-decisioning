@@ -1,0 +1,4 @@
+# Documentation-generation only -- not needed to run, test, or deploy the
+# pipeline. Required solely by scripts/generate_architecture_diagram.py to
+# regenerate docs/architecture.png.
+Pillow==12.3.0
